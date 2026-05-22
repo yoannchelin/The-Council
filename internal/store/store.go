@@ -32,6 +32,9 @@ func Open(dbPath string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB exposes the underlying sql.DB for test setup only.
+func (s *Store) DB() *sql.DB { return s.db }
+
 func (s *Store) migrate() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS council_assessments (
@@ -378,7 +381,7 @@ LIMIT ?`, assessmentID, limit)
 func (s *Store) LatestAssessmentID(repoPath string) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
-SELECT id FROM council_assessments WHERE repo_path=? ORDER BY created_at DESC LIMIT 1`, repoPath).Scan(&id)
+SELECT id FROM council_assessments WHERE repo_path=? ORDER BY created_at DESC, id DESC LIMIT 1`, repoPath).Scan(&id)
 	return id, err
 }
 
