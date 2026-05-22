@@ -65,10 +65,17 @@ CREATE TABLE IF NOT EXISTS council_meta (
 	return err
 }
 
+// tableExists checks if a table is present in the DB.
+func (s *Store) tableExists(name string) bool {
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&n)
+	return n > 0
+}
+
 // AgentsPresent checks which agent tables exist and have data.
 func (s *Store) AgentsPresent() map[string]bool {
 	checks := map[string]string{
-		"archaeo":  "SELECT 1 FROM symbols LIMIT 1",
+		"archaeo":  "SELECT 1 FROM files LIMIT 1",
 		"blast":    "SELECT 1 FROM blast_metrics LIMIT 1",
 		"sentinel": "SELECT 1 FROM sentinel_coverage LIMIT 1",
 		"hunter":   "SELECT 1 FROM hunter_file_stats LIMIT 1",
@@ -84,19 +91,22 @@ func (s *Store) AgentsPresent() map[string]bool {
 }
 
 // ---- blast_metrics ----
+// blast_metrics is keyed by symbol_id; join symbols + files to get path/qualified.
 
 type BlastMetric struct {
-	Qualified     string
-	Path          string
-	RiskScore     float64
-	FanIn         int
-	TransitiveIn  int
+	Qualified    string
+	Path         string
+	RiskScore    float64
+	FanIn        int
+	TransitiveIn int
 }
 
 func (s *Store) BlastMetrics() ([]BlastMetric, error) {
 	rows, err := s.db.Query(`
-SELECT qualified, path, risk_score, fan_in, transitive_in
-FROM blast_metrics`)
+SELECT s.qualified, f.path, bm.risk_score, bm.fan_in, bm.transitive_in
+FROM blast_metrics bm
+JOIN symbols s ON s.id = bm.symbol_id
+JOIN files   f ON f.id = s.file_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -113,17 +123,20 @@ FROM blast_metrics`)
 }
 
 // ---- sentinel_coverage ----
+// sentinel_coverage is keyed by symbol_id; column is direct_tests (not direct_test_count).
 
 type SentinelCoverage struct {
-	Path            string
-	Qualified       string
-	DirectTestCount int
+	Path        string
+	Qualified   string
+	DirectTests int
 }
 
 func (s *Store) SentinelCoverage() ([]SentinelCoverage, error) {
 	rows, err := s.db.Query(`
-SELECT path, COALESCE(qualified,''), COALESCE(direct_test_count,0)
-FROM sentinel_coverage`)
+SELECT f.path, s.qualified, sc.direct_tests
+FROM sentinel_coverage sc
+JOIN symbols s ON s.id = sc.symbol_id
+JOIN files   f ON f.id = s.file_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +144,7 @@ FROM sentinel_coverage`)
 	var out []SentinelCoverage
 	for rows.Next() {
 		var c SentinelCoverage
-		if err := rows.Scan(&c.Path, &c.Qualified, &c.DirectTestCount); err != nil {
+		if err := rows.Scan(&c.Path, &c.Qualified, &c.DirectTests); err != nil {
 			continue
 		}
 		out = append(out, c)
@@ -140,17 +153,20 @@ FROM sentinel_coverage`)
 }
 
 // ---- hunter_file_stats ----
+// hunter_file_stats is keyed by file_id; join files to get path.
+// Column is fix_commits (not bug_fixes).
 
 type HunterFileStat struct {
-	Path      string
-	BugFixes  int
-	FixRatio  float64 // bug-fix commits / total commits
+	Path       string
+	FixCommits int
+	FixRatio   float64
 }
 
 func (s *Store) HunterFileStats() ([]HunterFileStat, error) {
 	rows, err := s.db.Query(`
-SELECT path, COALESCE(bug_fixes,0), COALESCE(fix_ratio,0.0)
-FROM hunter_file_stats`)
+SELECT f.path, hfs.fix_commits, hfs.fix_ratio
+FROM hunter_file_stats hfs
+JOIN files f ON f.id = hfs.file_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +174,7 @@ FROM hunter_file_stats`)
 	var out []HunterFileStat
 	for rows.Next() {
 		var h HunterFileStat
-		if err := rows.Scan(&h.Path, &h.BugFixes, &h.FixRatio); err != nil {
+		if err := rows.Scan(&h.Path, &h.FixCommits, &h.FixRatio); err != nil {
 			continue
 		}
 		out = append(out, h)
@@ -167,20 +183,23 @@ FROM hunter_file_stats`)
 }
 
 // ---- dep_vulnerabilities ----
+// dep_vulnerabilities has module_id FK to dep_modules; column is cvss_score.
+// fixed_in non-null means a fix is available.
 
 type DepVulnerability struct {
-	Module   string
-	ID       string
+	Module   string // dep_modules.path
+	ID       string // vuln_id
 	Severity string
 	CVSS     float64
-	Fixed    bool
-	UsedIn   []string // paths that import this module
+	HasFix   bool
 }
 
 func (s *Store) DepVulnerabilities() ([]DepVulnerability, error) {
 	rows, err := s.db.Query(`
-SELECT module, vuln_id, COALESCE(severity,''), COALESCE(cvss,0.0), COALESCE(fixed,0)
-FROM dep_vulnerabilities`)
+SELECT dm.path, dv.vuln_id, dv.severity, COALESCE(dv.cvss_score, 0.0),
+       CASE WHEN dv.fixed_in IS NOT NULL AND dv.fixed_in != '' THEN 1 ELSE 0 END
+FROM dep_vulnerabilities dv
+JOIN dep_modules dm ON dm.id = dv.module_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -188,12 +207,78 @@ FROM dep_vulnerabilities`)
 	var out []DepVulnerability
 	for rows.Next() {
 		var v DepVulnerability
-		var fixedInt int
-		if err := rows.Scan(&v.Module, &v.ID, &v.Severity, &v.CVSS, &fixedInt); err != nil {
+		var hasFix int
+		if err := rows.Scan(&v.Module, &v.ID, &v.Severity, &v.CVSS, &hasFix); err != nil {
 			continue
 		}
-		v.Fixed = fixedInt == 1
+		v.HasFix = hasFix == 1
 		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// ---- dep_modules bad license / abandoned ----
+
+type DepModule struct {
+	Path        string
+	Version     string
+	IsAbandoned bool
+	LicenseOK   bool
+	License     string
+}
+
+func (s *Store) DepModuleProblems() ([]DepModule, error) {
+	rows, err := s.db.Query(`
+SELECT path, version, is_abandoned, license_ok, COALESCE(license,'')
+FROM dep_modules
+WHERE is_abandoned=1 OR license_ok=0`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DepModule
+	for rows.Next() {
+		var m DepModule
+		var abandoned, licOK int
+		if err := rows.Scan(&m.Path, &m.Version, &abandoned, &licOK, &m.License); err != nil {
+			continue
+		}
+		m.IsAbandoned = abandoned == 1
+		m.LicenseOK = licOK == 1
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// ---- archaeo churn (file_commits) ----
+
+type FileChurn struct {
+	Path        string
+	CommitCount int
+	LinesAdded  int
+	LinesDeleted int
+}
+
+func (s *Store) FileChurn() ([]FileChurn, error) {
+	rows, err := s.db.Query(`
+SELECT f.path,
+       COUNT(fc.commit_hash)    AS commit_count,
+       COALESCE(SUM(fc.added),0)   AS lines_added,
+       COALESCE(SUM(fc.deleted),0) AS lines_deleted
+FROM file_commits fc
+JOIN files f ON f.id = fc.file_id
+GROUP BY fc.file_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []FileChurn
+	for rows.Next() {
+		var c FileChurn
+		if err := rows.Scan(&c.Path, &c.CommitCount, &c.LinesAdded, &c.LinesDeleted); err != nil {
+			continue
+		}
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }
@@ -299,7 +384,6 @@ SELECT id FROM council_assessments WHERE repo_path=? ORDER BY created_at DESC LI
 
 // PurgeOldAssessments deletes assessments older than the given Unix timestamp.
 func (s *Store) PurgeOldAssessments(olderThan int64) (int64, error) {
-	// First collect IDs to delete
 	rows, err := s.db.Query(`SELECT id FROM council_assessments WHERE created_at < ?`, olderThan)
 	if err != nil {
 		return 0, err
@@ -320,4 +404,38 @@ func (s *Store) PurgeOldAssessments(olderThan int64) (int64, error) {
 		deleted += n
 	}
 	return deleted, nil
+}
+
+// MaxCommitCount returns the max commit_count across all files (for normalisation).
+func (s *Store) MaxCommitCount() int {
+	var n int
+	s.db.QueryRow(`
+SELECT COALESCE(MAX(cnt),1) FROM (
+    SELECT COUNT(*) AS cnt FROM file_commits GROUP BY file_id
+)`).Scan(&n)
+	if n == 0 {
+		return 1
+	}
+	return n
+}
+
+// DepPresentWithVulns checks if dep_vulnerabilities table has data.
+func (s *Store) DepPresentWithVulns() bool {
+	present := s.AgentsPresent()
+	return present["dep"]
+}
+
+// DepModulePresentWithProblems checks if dep_modules has abandoned/bad-license rows.
+func (s *Store) DepModulePresentWithProblems() bool {
+	if !s.tableExists("dep_modules") {
+		return false
+	}
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM dep_modules WHERE is_abandoned=1 OR license_ok=0`).Scan(&n)
+	return n > 0
+}
+
+// TableExists is exported for use in signals package.
+func (s *Store) TableExists(name string) bool {
+	return s.tableExists(name)
 }

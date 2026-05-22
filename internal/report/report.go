@@ -40,7 +40,6 @@ func Build(scored []correlate.ScoredZone, agentsPresent []string, missingAgents 
 		SignalSummary: make(map[string]int),
 	}
 
-	// Convergence zones
 	conv := correlate.ConvergenceZones(scored)
 	for _, z := range conv {
 		label := z.Path
@@ -50,7 +49,6 @@ func Build(scored []correlate.ScoredZone, agentsPresent []string, missingAgents 
 		a.ConvergenceZones = append(a.ConvergenceZones, label)
 	}
 
-	// Build action items
 	limit := topN
 	if limit > len(scored) {
 		limit = len(scored)
@@ -63,9 +61,7 @@ func Build(scored []correlate.ScoredZone, agentsPresent []string, missingAgents 
 		}
 	}
 
-	// Health score: 100 minus the average priority of top 10 (scaled to 100)
 	a.HealthScore = computeHealth(scored)
-
 	return a
 }
 
@@ -73,7 +69,6 @@ func buildItem(rank int, sz correlate.ScoredZone) ActionItem {
 	z := sz.Zone
 	var sigs []string
 	var parts []string
-
 	kind := "investigate_coupling"
 
 	if z.BlastScore > 0.4 {
@@ -92,15 +87,31 @@ func buildItem(rank int, sz correlate.ScoredZone) ActionItem {
 	}
 	if z.HunterScore > 0.3 {
 		sigs = append(sigs, "hunter")
-		parts = append(parts, fmt.Sprintf("%d bug fixes", z.HunterBugFixes))
+		parts = append(parts, fmt.Sprintf("%d bug-fix commits", z.HunterFixes))
 		if kind != "fix_untested_critical" {
 			kind = "fix_buggy_zone"
 		}
 	}
 	if z.DepVulnScore > 0 {
 		sigs = append(sigs, "dep")
-		parts = append(parts, fmt.Sprintf("CVEs: %s", strings.Join(z.DepVulnIDs, ", ")))
-		kind = "patch_vulnerability"
+		if len(z.DepVulnIDs) > 0 {
+			parts = append(parts, fmt.Sprintf("CVEs: %s", strings.Join(z.DepVulnIDs, ", ")))
+			kind = "patch_vulnerability"
+		}
+		if z.DepAbandoned {
+			parts = append(parts, "abandoned module")
+			kind = "replace_abandoned"
+		}
+		if z.DepBadLicense {
+			parts = append(parts, fmt.Sprintf("license issue (%s)", z.DepLicense))
+			if kind == "investigate_coupling" {
+				kind = "review_license"
+			}
+		}
+	}
+	if z.ChurnScore > 0.5 {
+		sigs = append(sigs, "archaeo")
+		parts = append(parts, fmt.Sprintf("high churn (%.0f%%)", z.ChurnScore*100))
 	}
 
 	target := z.Path
@@ -111,8 +122,6 @@ func buildItem(rank int, sz correlate.ScoredZone) ActionItem {
 	headline := fmt.Sprintf("%s — %s [score %.0f]",
 		target, strings.Join(parts, ", "), sz.PriorityScore*100)
 
-	action := actionText(kind, z)
-
 	return ActionItem{
 		Rank:          rank,
 		Kind:          kind,
@@ -121,18 +130,22 @@ func buildItem(rank int, sz correlate.ScoredZone) ActionItem {
 		Qualified:     z.Qualified,
 		Path:          z.Path,
 		Headline:      headline,
-		Action:        action,
+		Action:        actionText(kind, z),
 	}
 }
 
 func actionText(kind string, z *signals.Zone) string {
 	switch kind {
 	case "fix_untested_critical":
-		return fmt.Sprintf("Write tests for %s — it has high blast radius with zero direct tests.", z.Path)
+		return fmt.Sprintf("Write tests for %s — high blast radius, zero direct tests.", z.Path)
 	case "fix_buggy_zone":
-		return fmt.Sprintf("Review %s for recurring error patterns (%d bug-fix commits).", z.Path, z.HunterBugFixes)
+		return fmt.Sprintf("Review %s for recurring error patterns (%d bug-fix commits).", z.Path, z.HunterFixes)
 	case "patch_vulnerability":
-		return fmt.Sprintf("Patch dependencies with CVEs: %s", strings.Join(z.DepVulnIDs, ", "))
+		return fmt.Sprintf("Patch CVEs in dependencies: %s", strings.Join(z.DepVulnIDs, ", "))
+	case "replace_abandoned":
+		return fmt.Sprintf("Replace abandoned module %s with a maintained alternative.", z.Path)
+	case "review_license":
+		return fmt.Sprintf("Review license compatibility for %s (license: %s).", z.Path, z.DepLicense)
 	case "add_coverage":
 		return fmt.Sprintf("Increase test coverage for %s.", z.Path)
 	default:
@@ -152,8 +165,7 @@ func computeHealth(scored []correlate.ScoredZone) float64 {
 	for _, s := range top {
 		sum += s.PriorityScore
 	}
-	avg := sum / float64(len(top))
-	health := 100.0 * (1.0 - avg)
+	health := 100.0 * (1.0 - sum/float64(len(top)))
 	if health < 0 {
 		health = 0
 	}
@@ -183,11 +195,10 @@ func ToStoreItems(assessmentID int64, items []ActionItem) []store.ActionItem {
 func FormatText(a *Assessment, repoPath string) string {
 	var sb strings.Builder
 
-	sb.WriteString("Council Assessment\n")
-	sb.WriteString(fmt.Sprintf("Repo: %s\n", repoPath))
-	sb.WriteString(fmt.Sprintf("Health score: %.0f/100\n", a.HealthScore))
+	fmt.Fprintf(&sb, "Council Assessment\n")
+	fmt.Fprintf(&sb, "Repo: %s\n", repoPath)
+	fmt.Fprintf(&sb, "Health score: %.0f/100\n", a.HealthScore)
 
-	// Agents line
 	var agentParts []string
 	for _, ag := range []string{"archaeo", "blast", "sentinel", "hunter", "dep"} {
 		mark := "✗"
@@ -199,23 +210,23 @@ func FormatText(a *Assessment, repoPath string) string {
 		}
 		agentParts = append(agentParts, ag+" "+mark)
 	}
-	sb.WriteString(fmt.Sprintf("Agents: %s\n", strings.Join(agentParts, ", ")))
+	fmt.Fprintf(&sb, "Agents: %s\n", strings.Join(agentParts, ", "))
 	if len(a.MissingAgents) > 0 {
-		sb.WriteString(fmt.Sprintf("Missing signals: %s\n", strings.Join(a.MissingAgents, ", ")))
+		fmt.Fprintf(&sb, "Missing signals: %s\n", strings.Join(a.MissingAgents, ", "))
 	}
 	sb.WriteString("\n")
 
-	sb.WriteString(fmt.Sprintf("TOP %d ACTION ITEMS\n\n", len(a.TopItems)))
+	fmt.Fprintf(&sb, "TOP %d ACTION ITEMS\n\n", len(a.TopItems))
 	for _, it := range a.TopItems {
-		sb.WriteString(fmt.Sprintf("%d. [score %.0f] %s\n", it.Rank, it.PriorityScore*100, strings.ToUpper(it.Kind)))
-		sb.WriteString(fmt.Sprintf("   %s\n", it.Headline))
-		sb.WriteString(fmt.Sprintf("   Action: %s\n\n", it.Action))
+		fmt.Fprintf(&sb, "%d. [score %.0f] %s\n", it.Rank, it.PriorityScore*100, strings.ToUpper(it.Kind))
+		fmt.Fprintf(&sb, "   %s\n", it.Headline)
+		fmt.Fprintf(&sb, "   Action: %s\n\n", it.Action)
 	}
 
 	if len(a.ConvergenceZones) > 0 {
 		sb.WriteString("CONVERGENCE ZONES (3+ signals)\n")
 		for _, z := range a.ConvergenceZones {
-			sb.WriteString(fmt.Sprintf("  %s\n", z))
+			fmt.Fprintf(&sb, "  %s\n", z)
 		}
 	}
 

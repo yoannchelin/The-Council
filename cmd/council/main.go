@@ -184,7 +184,10 @@ func cmdExplain(args []string) {
 			fmt.Printf("  sentinel: gap %.0f%% (0=tested, 100=no tests)\n", z.SentinelGap*100)
 		}
 		if z.HunterScore >= 0 {
-			fmt.Printf("  hunter:   %.0f%% fix ratio (%d bug fixes)\n", z.HunterScore*100, z.HunterBugFixes)
+			fmt.Printf("  hunter:   %.0f%% fix ratio (%d bug-fix commits)\n", z.HunterScore*100, z.HunterFixes)
+		}
+		if z.ChurnScore >= 0 {
+			fmt.Printf("  churn:    %.0f%% relative churn\n", z.ChurnScore*100)
 		}
 		if z.DepVulnScore >= 0 {
 			fmt.Printf("  dep:      CVE score %.0f/100 (%s)\n", z.DepVulnScore*100, joinStrs(z.DepVulnIDs))

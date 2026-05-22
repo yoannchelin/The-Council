@@ -20,11 +20,13 @@ func Score(z *signals.Zone) float64 {
 	sentinel := max0(z.SentinelGap)
 	hunter := max0(z.HunterScore)
 	dep := max0(z.DepVulnScore)
+	churn := max0(z.ChurnScore)
 
 	score := blast*Weights.Blast +
 		sentinel*Weights.Sentinel +
 		hunter*Weights.Hunter +
-		dep*Weights.Dep
+		dep*Weights.Dep +
+		churn*Weights.Churn
 
 	if z.SignalCount >= ConvergenceThreshold {
 		score *= Weights.Convergence
