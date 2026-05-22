@@ -126,17 +126,20 @@ JOIN files   f ON f.id = s.file_id`)
 }
 
 // ---- sentinel_coverage ----
-// sentinel_coverage is keyed by symbol_id; column is direct_tests (not direct_test_count).
+// sentinel_coverage is keyed by symbol_id.
+// quality_score (0..1) is the agent's pre-computed coverage quality — more reliable than raw direct_tests.
 
 type SentinelCoverage struct {
-	Path        string
-	Qualified   string
-	DirectTests int
+	Path         string
+	Qualified    string
+	DirectTests  int
+	QualityScore float64 // 0 = untested, 1 = well covered
+	IsTested     bool
 }
 
 func (s *Store) SentinelCoverage() ([]SentinelCoverage, error) {
 	rows, err := s.db.Query(`
-SELECT f.path, s.qualified, sc.direct_tests
+SELECT f.path, s.qualified, sc.direct_tests, sc.quality_score, sc.is_tested
 FROM sentinel_coverage sc
 JOIN symbols s ON s.id = sc.symbol_id
 JOIN files   f ON f.id = s.file_id`)
@@ -147,10 +150,41 @@ JOIN files   f ON f.id = s.file_id`)
 	var out []SentinelCoverage
 	for rows.Next() {
 		var c SentinelCoverage
-		if err := rows.Scan(&c.Path, &c.Qualified, &c.DirectTests); err != nil {
+		var isTested int
+		if err := rows.Scan(&c.Path, &c.Qualified, &c.DirectTests, &c.QualityScore, &isTested); err != nil {
 			continue
 		}
+		c.IsTested = isTested == 1
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// SentinelFindingMaxRisk returns the worst sentinel_findings risk_score per path.
+// Only includes paths where risk_score > 0.
+type SentinelFinding struct {
+	Path      string
+	MaxRisk   float64 // 0..100 from sentinel
+	Severity  string
+}
+
+func (s *Store) SentinelFindingMaxRisk() ([]SentinelFinding, error) {
+	rows, err := s.db.Query(`
+SELECT path, MAX(risk_score), severity
+FROM sentinel_findings
+WHERE risk_score > 0
+GROUP BY path`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SentinelFinding
+	for rows.Next() {
+		var f SentinelFinding
+		if err := rows.Scan(&f.Path, &f.MaxRisk, &f.Severity); err != nil {
+			continue
+		}
+		out = append(out, f)
 	}
 	return out, rows.Err()
 }

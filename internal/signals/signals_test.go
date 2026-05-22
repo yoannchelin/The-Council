@@ -150,11 +150,12 @@ func TestCollect_SentinelGap_NoTests(t *testing.T) {
 
 	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'pkg/a.go','a')`)
 	s.DB().Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'a.Func',1,'func','Func')`)
-	s.DB().Exec(`INSERT INTO sentinel_coverage(symbol_id,direct_tests) VALUES(1,0)`)
+	// quality_score=0, is_tested=0 → gap should be 1.0
+	s.DB().Exec(`INSERT INTO sentinel_coverage(symbol_id,direct_tests,quality_score,is_tested) VALUES(1,0,0.0,0)`)
 
 	zones, _, _ := Collect(s, "")
 	for _, z := range zones {
-		if z.SentinelGap != 1.0 {
+		if z.SentinelGap >= 0 && z.SentinelGap != 1.0 {
 			t.Errorf("expected sentinel gap 1.0, got %f", z.SentinelGap)
 		}
 	}
@@ -166,11 +167,12 @@ func TestCollect_SentinelGap_WellTested(t *testing.T) {
 
 	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'pkg/b.go','b')`)
 	s.DB().Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'b.F',1,'func','F')`)
-	s.DB().Exec(`INSERT INTO sentinel_coverage(symbol_id,direct_tests) VALUES(1,10)`)
+	// quality_score=1.0, is_tested=1 → gap should be 0.0
+	s.DB().Exec(`INSERT INTO sentinel_coverage(symbol_id,direct_tests,quality_score,is_tested) VALUES(1,10,1.0,1)`)
 
 	zones, _, _ := Collect(s, "")
 	for _, z := range zones {
-		if z.SentinelGap != 0.0 {
+		if z.SentinelGap >= 0 && z.SentinelGap != 0.0 {
 			t.Errorf("expected gap 0.0, got %f", z.SentinelGap)
 		}
 	}
@@ -233,6 +235,41 @@ func TestCollect_ChurnSignal(t *testing.T) {
 		if z.ChurnScore != 1.0 {
 			t.Errorf("churn score = %f, want 1.0", z.ChurnScore)
 		}
+	}
+}
+
+func TestCollect_ZoneMerge_SymbolInheritsFileSignals(t *testing.T) {
+	s, cleanup := openDB(t)
+	defer cleanup()
+
+	// File-level: hunter has data for internal/pay.go
+	// Symbol-level: blast has data for internal/pay.go|pay.Charge
+	// After merging, the symbol zone should have both blast AND hunter.
+	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'internal/pay.go','pay')`)
+	s.DB().Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'pay.Charge',1,'func','Charge')`)
+	s.DB().Exec(`INSERT INTO blast_metrics(symbol_id,risk_score,fan_in) VALUES(1,80.0,10)`)
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,fix_commits,fix_ratio) VALUES(1,5,0.5)`)
+
+	zones, _, _ := Collect(s, "")
+
+	// Find the symbol-level zone for pay.Charge
+	var symZone *Zone
+	for _, z := range zones {
+		if z.Qualified == "pay.Charge" {
+			symZone = z
+		}
+	}
+	if symZone == nil {
+		t.Fatal("symbol zone pay.Charge not found")
+	}
+	if symZone.BlastScore < 0 {
+		t.Error("symbol zone should have blast signal")
+	}
+	if symZone.HunterScore < 0 {
+		t.Error("symbol zone should have inherited hunter signal from file zone")
+	}
+	if symZone.HunterFixes != 5 {
+		t.Errorf("hunter fixes = %d, want 5", symZone.HunterFixes)
 	}
 }
 

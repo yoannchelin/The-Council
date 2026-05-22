@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/yoannchl/the-council/internal/correlate"
@@ -36,7 +38,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `council — The Council meta-agent CLI
 
 Usage:
-  council assess  --db <path> [--repo <path>] [--top <n>] [--min <score>]
+  council assess  --db <path> [--repo <path>] [--top <n>] [--min <score>] [--json]
   council top     --db <path> [--repo <path>] [--n <n>]
   council explain --db <path> [--repo <path>] (--path <p> | --qualified <q>)
   council purge   --db <path> --older-than <days>`)
@@ -57,6 +59,7 @@ func cmdAssess(args []string) {
 	repoPath := fs.String("repo", ".", "Repo root (for path normalisation)")
 	topN := fs.Int("top", 10, "Number of action items")
 	minPriority := fs.Float64("min", 0.0, "Minimum priority score (0..1)")
+	asJSON := fs.Bool("json", false, "Output JSON instead of text")
 	fs.Parse(args)
 
 	if *dbPath == "" {
@@ -77,7 +80,6 @@ func cmdAssess(args []string) {
 	present := agentNames(s.AgentsPresent())
 	a := report.Build(scored, present, missing, *topN)
 
-	// Persist
 	summary := map[string]any{
 		"total_zones":       len(zones),
 		"scored_zones":      len(scored),
@@ -94,6 +96,20 @@ func cmdAssess(args []string) {
 		fmt.Fprintf(os.Stderr, "warning: could not save assessment: %v\n", err)
 	} else {
 		s.SaveActionItems(report.ToStoreItems(assessID, a.TopItems))
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		enc.Encode(map[string]any{
+			"health_score":      a.HealthScore,
+			"agents_present":    a.AgentsPresent,
+			"missing_agents":    a.MissingAgents,
+			"top_action_items":  a.TopItems,
+			"signal_summary":    a.SignalSummary,
+			"convergence_zones": a.ConvergenceZones,
+		})
+		return
 	}
 
 	fmt.Print(report.FormatText(a, *repoPath))
@@ -160,14 +176,10 @@ func cmdExplain(args []string) {
 
 	found := false
 	for _, z := range zones {
-		match := false
-		if *path != "" && containsStr(z.Path, *path) {
-			match = true
+		if *path != "" && !strings.Contains(z.Path, *path) {
+			continue
 		}
-		if *qualified != "" && containsStr(z.Qualified, *qualified) {
-			match = true
-		}
-		if !match {
+		if *qualified != "" && !strings.Contains(z.Qualified, *qualified) {
 			continue
 		}
 		found = true
@@ -181,7 +193,7 @@ func cmdExplain(args []string) {
 			fmt.Printf("  blast:    %.0f/100 (fan-in %d)\n", z.BlastScore*100, z.BlastFanIn)
 		}
 		if z.SentinelGap >= 0 {
-			fmt.Printf("  sentinel: gap %.0f%% (0=tested, 100=no tests)\n", z.SentinelGap*100)
+			fmt.Printf("  sentinel: gap %.0f%% (0=well covered, 100=no coverage)\n", z.SentinelGap*100)
 		}
 		if z.HunterScore >= 0 {
 			fmt.Printf("  hunter:   %.0f%% fix ratio (%d bug-fix commits)\n", z.HunterScore*100, z.HunterFixes)
@@ -190,7 +202,11 @@ func cmdExplain(args []string) {
 			fmt.Printf("  churn:    %.0f%% relative churn\n", z.ChurnScore*100)
 		}
 		if z.DepVulnScore >= 0 {
-			fmt.Printf("  dep:      CVE score %.0f/100 (%s)\n", z.DepVulnScore*100, joinStrs(z.DepVulnIDs))
+			fmt.Printf("  dep:      CVE score %.0f/100", z.DepVulnScore*100)
+			if len(z.DepVulnIDs) > 0 {
+				fmt.Printf(" (%s)", strings.Join(z.DepVulnIDs, ", "))
+			}
+			fmt.Println()
 		}
 		fmt.Println()
 	}
@@ -231,28 +247,4 @@ func agentNames(present map[string]bool) []string {
 		}
 	}
 	return out
-}
-
-func containsStr(s, sub string) bool {
-	return len(sub) > 0 && len(s) >= len(sub) && (s == sub || len(s) > 0 && stringContains(s, sub))
-}
-
-func stringContains(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
-}
-
-func joinStrs(ss []string) string {
-	result := ""
-	for i, s := range ss {
-		if i > 0 {
-			result += ", "
-		}
-		result += s
-	}
-	return result
 }
