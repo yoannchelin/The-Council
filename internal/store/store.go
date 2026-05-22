@@ -518,3 +518,89 @@ func (s *Store) DepModulePresentWithProblems() bool {
 func (s *Store) TableExists(name string) bool {
 	return s.tableExists(name)
 }
+
+// MaxBlastRiskScore returns the maximum risk_score in blast_metrics (for relative normalisation).
+// Returns 100.0 as a safe fallback so callers can always divide without guard.
+func (s *Store) MaxBlastRiskScore() float64 {
+	var v float64
+	s.db.QueryRow(`SELECT COALESCE(MAX(risk_score), 100.0) FROM blast_metrics`).Scan(&v)
+	if v <= 0 {
+		return 100.0
+	}
+	return v
+}
+
+// SentinelSymbolRisk holds the maximum sentinel_findings risk_score for a symbol.
+type SentinelSymbolRisk struct {
+	SymbolID  int64
+	Qualified string
+	Path      string
+	MaxRisk   float64
+}
+
+// SentinelSymbolRiskScores returns the worst sentinel_findings risk per non-test symbol.
+// Only includes symbols with at least one finding (risk_score > 0).
+func (s *Store) SentinelSymbolRiskScores() ([]SentinelSymbolRisk, error) {
+	if !s.tableExists("sentinel_findings") {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+SELECT sf.symbol_id, s.qualified, f.path, MAX(sf.risk_score)
+FROM sentinel_findings sf
+JOIN symbols s ON s.id = sf.symbol_id
+JOIN files   f ON f.id = s.file_id
+WHERE f.is_test = 0 AND sf.risk_score > 0
+GROUP BY sf.symbol_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SentinelSymbolRisk
+	for rows.Next() {
+		var r SentinelSymbolRisk
+		if err := rows.Scan(&r.SymbolID, &r.Qualified, &r.Path, &r.MaxRisk); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// HunterFileFinding holds aggregated hunter_findings signals per file.
+type HunterFileFinding struct {
+	Path         string
+	MaxBlastRisk float64 // worst blast_risk across all findings for this file
+	IsHotspot    bool    // has a fix_hotspot finding
+	IsBusFactor1 bool    // has a bus_factor_1 finding
+}
+
+// HunterFindingsByFile aggregates hunter_findings per file path.
+// Used as a fallback when hunter_file_stats rows have too few commits.
+func (s *Store) HunterFindingsByFile() ([]HunterFileFinding, error) {
+	if !s.tableExists("hunter_findings") {
+		return nil, nil
+	}
+	rows, err := s.db.Query(`
+SELECT path, MAX(blast_risk),
+       MAX(CASE WHEN kind='fix_hotspot'  THEN 1 ELSE 0 END),
+       MAX(CASE WHEN kind='bus_factor_1' THEN 1 ELSE 0 END)
+FROM hunter_findings
+WHERE path != ''
+GROUP BY path`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []HunterFileFinding
+	for rows.Next() {
+		var h HunterFileFinding
+		var hotspot, busFactor int
+		if err := rows.Scan(&h.Path, &h.MaxBlastRisk, &hotspot, &busFactor); err != nil {
+			continue
+		}
+		h.IsHotspot = hotspot == 1
+		h.IsBusFactor1 = busFactor == 1
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}

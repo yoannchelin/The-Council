@@ -119,28 +119,35 @@ func TestCollect_BlastSignal(t *testing.T) {
 	s, cleanup := openDB(t)
 	defer cleanup()
 
+	// Two symbols: max=100, other=80. Relative normalization: 80/100=0.8.
 	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'internal/pay.go','pay')`)
+	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(2,'internal/core.go','core')`)
 	s.DB().Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'pay.Charge',1,'func','Charge')`)
+	s.DB().Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(2,'core.Init',2,'func','Init')`)
 	s.DB().Exec(`INSERT INTO blast_metrics(symbol_id,risk_score,fan_in) VALUES(1,80.0,15)`)
+	s.DB().Exec(`INSERT INTO blast_metrics(symbol_id,risk_score,fan_in) VALUES(2,100.0,20)`)
 
 	zones, missing, err := Collect(s, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(zones) != 1 {
-		t.Fatalf("expected 1 zone, got %d", len(zones))
-	}
 
 	var z *Zone
 	for _, v := range zones {
-		z = v
+		if v.Qualified == "pay.Charge" {
+			z = v
+		}
+	}
+	if z == nil {
+		t.Fatal("pay.Charge zone not found")
 	}
 
 	if z.BlastScore < 0 {
 		t.Error("blast score should be set")
 	}
+	// Relative normalisation: 80/max(100) = 0.8
 	if abs(z.BlastScore-0.8) > 1e-9 {
-		t.Errorf("blast score = %f, want 0.8", z.BlastScore)
+		t.Errorf("blast score = %f, want 0.8 (relative to max=100)", z.BlastScore)
 	}
 
 	// blast present, others absent

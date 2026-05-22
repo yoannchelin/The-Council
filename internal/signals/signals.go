@@ -102,13 +102,17 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 
 	// ---- blast ----
 	if present["blast"] {
+		// Normalise relative to the repo's actual max, not a fixed 100.
+		// Blast formulas in practice produce 0–50 on large repos; dividing by
+		// the true max ensures the top symbol always reaches 1.0.
+		maxBlast := s.MaxBlastRiskScore()
 		metrics, err := s.BlastMetrics()
 		if err != nil {
 			return nil, nil, fmt.Errorf("blast metrics: %w", err)
 		}
 		for _, m := range metrics {
 			z := getOrCreateSym(m.Path, m.Qualified)
-			z.BlastScore = clamp01(m.RiskScore / 100.0)
+			z.BlastScore = clamp01(m.RiskScore / maxBlast)
 			z.BlastFanIn = m.FanIn
 		}
 	} else {
@@ -123,26 +127,27 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 		}
 		for _, c := range covs {
 			z := getOrCreateSym(c.Path, c.Qualified)
-			// Use agent-computed quality_score as the primary signal.
-			// gap = 1 - quality_score: high gap means poor coverage.
 			z.SentinelGap = clamp01(1.0 - c.QualityScore)
 		}
 
-		// Boost sentinel gap where critical findings exist, regardless of test count.
-		if s.TableExists("sentinel_findings") {
-			findings, err := s.SentinelFindingMaxRisk()
-			if err == nil {
-				for _, f := range findings {
-					// sentinel_findings has direct path column — match to any zone on that path.
-					p := normP(f.Path)
-					for k, z := range zones {
-						if strings.HasPrefix(k, p) && z.SentinelGap >= 0 {
-							boost := clamp01(f.MaxRisk / 100.0)
-							if boost > z.SentinelGap {
-								z.SentinelGap = boost
-							}
-						}
-					}
+		// Use per-symbol sentinel_findings risk scores to calibrate the gap.
+		// When quality_score=0 everywhere (agent didn't compute it), findings
+		// risk_score provides the only meaningful differentiation between symbols.
+		symRisks, err := s.SentinelSymbolRiskScores()
+		if err == nil && len(symRisks) > 0 {
+			maxSymRisk := 1.0
+			for _, r := range symRisks {
+				if r.MaxRisk > maxSymRisk {
+					maxSymRisk = r.MaxRisk
+				}
+			}
+			for _, r := range symRisks {
+				gap := clamp01(r.MaxRisk / maxSymRisk)
+				z := getOrCreateSym(r.Path, r.Qualified)
+				// Use findings-derived gap when it's more informative than the
+				// quality_score gap (e.g. quality_score=0 makes gap=1.0 uniform).
+				if z.SentinelGap == 1.0 || gap > z.SentinelGap {
+					z.SentinelGap = gap
 				}
 			}
 		}
@@ -156,10 +161,34 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 		if err != nil {
 			return nil, nil, fmt.Errorf("hunter stats: %w", err)
 		}
+		hunterActive := false
 		for _, h := range stats {
 			z := getOrCreateFile(h.Path)
 			z.HunterScore = clamp01(h.FixRatio)
 			z.HunterFixes = h.FixCommits
+			hunterActive = true
+		}
+
+		// Fallback: use hunter_findings when hunter_file_stats is too sparse
+		// (e.g. all files have total_commits<5 due to a small commit window).
+		// fix_hotspot findings map directly to a high bug probability.
+		if !hunterActive {
+			findings, ferr := s.HunterFindingsByFile()
+			if ferr == nil && len(findings) > 0 {
+				maxRisk := 1.0
+				for _, f := range findings {
+					if f.MaxBlastRisk > maxRisk {
+						maxRisk = f.MaxBlastRisk
+					}
+				}
+				for _, f := range findings {
+					z := getOrCreateFile(f.Path)
+					if f.IsHotspot {
+						// fix_hotspot: treat as a meaningful but not extreme bug signal.
+						z.HunterScore = clamp01(f.MaxBlastRisk / maxRisk * 0.8)
+					}
+				}
+			}
 		}
 	} else {
 		missing = append(missing, "hunter")
@@ -219,7 +248,10 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 					z.DepVulnScore = 0.5
 				}
 			}
-			if !m.LicenseOK {
+			// Only flag bad license when we KNOW the license is problematic.
+			// An empty/unknown license string means the dep agent couldn't
+			// identify it — "unknown" ≠ "bad". Flag only when license is set.
+			if !m.LicenseOK && m.License != "" {
 				z.DepBadLicense = true
 				z.DepLicense = m.License
 				if z.DepVulnScore < 0 {

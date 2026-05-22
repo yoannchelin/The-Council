@@ -74,21 +74,26 @@ func buildItem(rank int, sz correlate.ScoredZone) ActionItem {
 
 	if z.BlastScore > 0.4 {
 		sigs = append(sigs, "blast")
-		parts = append(parts, fmt.Sprintf("blast radius %.0f", z.BlastScore*100))
+		// Show both the normalised score and the actual direct fan-in count.
+		parts = append(parts, fmt.Sprintf("blast score %.0f/100 (fan-in %d)", z.BlastScore*100, z.BlastFanIn))
 	}
 	if z.SentinelGap > 0.6 {
 		sigs = append(sigs, "sentinel")
-		if z.SentinelGap == 1.0 {
-			parts = append(parts, "0 tests")
+		if z.SentinelGap >= 0.95 {
+			parts = append(parts, "no test coverage")
 			kind = "fix_untested_critical"
 		} else {
-			parts = append(parts, "low test coverage")
+			parts = append(parts, fmt.Sprintf("low test coverage (gap %.0f%%)", z.SentinelGap*100))
 			kind = "add_coverage"
 		}
 	}
 	if z.HunterScore > 0.3 {
 		sigs = append(sigs, "hunter")
-		parts = append(parts, fmt.Sprintf("%d bug-fix commits", z.HunterFixes))
+		if z.HunterFixes > 0 {
+			parts = append(parts, fmt.Sprintf("%d bug-fix commits", z.HunterFixes))
+		} else {
+			parts = append(parts, "fix hotspot")
+		}
 		if kind != "fix_untested_critical" {
 			kind = "fix_buggy_zone"
 		}
@@ -144,7 +149,10 @@ func actionText(kind string, z *signals.Zone) string {
 	case "fix_untested_critical":
 		return fmt.Sprintf("Write tests for %s — high blast radius, zero direct tests.", z.Path)
 	case "fix_buggy_zone":
-		return fmt.Sprintf("Review %s for recurring error patterns (%d bug-fix commits).", z.Path, z.HunterFixes)
+		if z.HunterFixes > 0 {
+			return fmt.Sprintf("Review %s for recurring error patterns (%d bug-fix commits).", z.Path, z.HunterFixes)
+		}
+		return fmt.Sprintf("Review %s — flagged as a fix hotspot by hunter (high blast risk in recent fix commits).", z.Path)
 	case "patch_vulnerability":
 		return fmt.Sprintf("Patch CVEs in dependencies: %s", strings.Join(z.DepVulnIDs, ", "))
 	case "replace_abandoned":

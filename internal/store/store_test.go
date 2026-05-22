@@ -465,6 +465,127 @@ func TestCoChangePairs_MinThreshold(t *testing.T) {
 	}
 }
 
+func TestMaxBlastRiskScore(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	// No metrics yet — should fall back to 100.
+	v := s.MaxBlastRiskScore()
+	if v != 100.0 {
+		t.Errorf("expected 100.0 fallback, got %f", v)
+	}
+
+	insertFile(t, s, 1, "pkg/a.go")
+	insertSymbol(t, s, 1, 1, "a.F")
+	insertFile(t, s, 2, "pkg/b.go")
+	insertSymbol(t, s, 2, 2, "b.G")
+	s.db.Exec(`INSERT INTO blast_metrics(symbol_id,risk_score) VALUES(1,42.5)`)
+	s.db.Exec(`INSERT INTO blast_metrics(symbol_id,risk_score) VALUES(2,67.3)`)
+
+	v = s.MaxBlastRiskScore()
+	if abs(v-67.3) > 1e-9 {
+		t.Errorf("expected 67.3, got %f", v)
+	}
+}
+
+func TestSentinelSymbolRiskScores(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	// No sentinel_findings table yet — should return nil gracefully.
+	risks, err := s.SentinelSymbolRiskScores()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(risks) != 0 {
+		t.Errorf("expected 0 results without table, got %d", len(risks))
+	}
+
+	// Create table and populate.
+	s.db.Exec(`CREATE TABLE sentinel_findings (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		symbol_id INTEGER NOT NULL,
+		kind TEXT NOT NULL DEFAULT 'untested',
+		severity TEXT NOT NULL DEFAULT 'low',
+		risk_score REAL NOT NULL DEFAULT 0,
+		blast_radius INTEGER NOT NULL DEFAULT 0,
+		message TEXT NOT NULL DEFAULT '',
+		path TEXT NOT NULL DEFAULT '',
+		line INTEGER NOT NULL DEFAULT 0
+	)`)
+	insertFile(t, s, 1, "pkg/auth.go")
+	insertSymbol(t, s, 1, 1, "auth.Login")
+	s.db.Exec(`INSERT INTO sentinel_findings(symbol_id,kind,severity,risk_score,path) VALUES(1,'untested','high',35.0,'pkg/auth.go')`)
+	s.db.Exec(`INSERT INTO sentinel_findings(symbol_id,kind,severity,risk_score,path) VALUES(1,'untested','medium',20.0,'pkg/auth.go')`)
+
+	risks, err = s.SentinelSymbolRiskScores()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(risks) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(risks))
+	}
+	if abs(risks[0].MaxRisk-35.0) > 1e-9 {
+		t.Errorf("max risk = %f, want 35.0", risks[0].MaxRisk)
+	}
+	if risks[0].Qualified != "auth.Login" {
+		t.Errorf("qualified = %q", risks[0].Qualified)
+	}
+}
+
+func TestHunterFindingsByFile(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	// No table — should return nil gracefully.
+	findings, err := s.HunterFindingsByFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Errorf("expected 0 without table")
+	}
+
+	s.db.Exec(`CREATE TABLE hunter_findings (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		file_id INTEGER, symbol_id INTEGER,
+		kind TEXT NOT NULL, severity TEXT NOT NULL,
+		message TEXT NOT NULL, path TEXT NOT NULL,
+		line INTEGER NOT NULL DEFAULT 0,
+		blast_radius INTEGER NOT NULL DEFAULT 0,
+		blast_risk REAL NOT NULL DEFAULT 0
+	)`)
+	s.db.Exec(`INSERT INTO hunter_findings(file_id,kind,severity,message,path,blast_risk) VALUES(1,'fix_hotspot','high','fix ratio 100%','cmd/api.go',22.5)`)
+	s.db.Exec(`INSERT INTO hunter_findings(file_id,kind,severity,message,path,blast_risk) VALUES(1,'bus_factor_1','high','single author','cmd/api.go',22.5)`)
+
+	findings, err = s.HunterFindingsByFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 file finding, got %d", len(findings))
+	}
+	if findings[0].Path != "cmd/api.go" {
+		t.Errorf("path = %q", findings[0].Path)
+	}
+	if !findings[0].IsHotspot {
+		t.Error("should be hotspot")
+	}
+	if !findings[0].IsBusFactor1 {
+		t.Error("should be bus_factor_1")
+	}
+	if abs(findings[0].MaxBlastRisk-22.5) > 1e-9 {
+		t.Errorf("max blast risk = %f", findings[0].MaxBlastRisk)
+	}
+}
+
+func abs(v float64) float64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func TestSaveAndLoadAssessment(t *testing.T) {
 	s, cleanup := openTestStore(t)
 	defer cleanup()
