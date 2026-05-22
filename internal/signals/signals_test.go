@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS dep_vulnerabilities (
     cvss_score REAL, summary TEXT NOT NULL DEFAULT '', fixed_in TEXT,
     blast_risk REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS hunter_cochange (
+    file_a INTEGER NOT NULL REFERENCES files(id),
+    file_b INTEGER NOT NULL REFERENCES files(id),
+    co_commits INTEGER NOT NULL DEFAULT 0,
+    has_edge INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (file_a, file_b)
+);
 `
 
 func TestCollect_AllAgentsAbsent(t *testing.T) {
@@ -349,6 +356,85 @@ func TestCollect_TestFiles_Excluded(t *testing.T) {
 		if z.BlastScore >= 0 || z.SentinelGap >= 0 {
 			t.Errorf("test file zone should have no blast/sentinel signals, got blast=%f sentinel=%f", z.BlastScore, z.SentinelGap)
 		}
+	}
+}
+
+func TestCollect_CouplingSignal(t *testing.T) {
+	s, cleanup := openDB(t)
+	defer cleanup()
+
+	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'pkg/auth.go','auth')`)
+	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(2,'pkg/user.go','user')`)
+	// auth↔user: 9 co-commits without explicit edge
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(1,10,3,0.3)`)
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(2,10,2,0.2)`)
+	s.DB().Exec(`INSERT INTO hunter_cochange(file_a,file_b,co_commits,has_edge) VALUES(1,2,9,0)`)
+
+	zones, _, err := Collect(s, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var authZone, userZone *Zone
+	for _, z := range zones {
+		if z.Path == "pkg/auth.go" {
+			authZone = z
+		}
+		if z.Path == "pkg/user.go" {
+			userZone = z
+		}
+	}
+	if authZone == nil || userZone == nil {
+		t.Fatal("expected zones for both files")
+	}
+	if authZone.CouplingScore < 0 {
+		t.Error("auth zone should have coupling score set")
+	}
+	if authZone.CouplingScore != 1.0 {
+		t.Errorf("coupling score = %f, want 1.0 (only pair, normalises to max)", authZone.CouplingScore)
+	}
+	if authZone.CouplingWith != "pkg/user.go" {
+		t.Errorf("coupling with = %q, want pkg/user.go", authZone.CouplingWith)
+	}
+	if userZone.CouplingScore < 0 {
+		t.Error("user zone should also have coupling score set (bidirectional)")
+	}
+}
+
+func TestCollect_CouplingSignal_NormalisedByMax(t *testing.T) {
+	s, cleanup := openDB(t)
+	defer cleanup()
+
+	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'a.go','a')`)
+	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(2,'b.go','b')`)
+	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(3,'c.go','c')`)
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(1,10,3,0.3)`)
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(2,10,2,0.2)`)
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(3,10,1,0.1)`)
+	// a↔b: 6 co-commits (max), a↔c: 3 co-commits (half of max)
+	s.DB().Exec(`INSERT INTO hunter_cochange(file_a,file_b,co_commits,has_edge) VALUES(1,2,6,0)`)
+	s.DB().Exec(`INSERT INTO hunter_cochange(file_a,file_b,co_commits,has_edge) VALUES(1,3,3,0)`)
+
+	zones, _, _ := Collect(s, "")
+
+	var bZone, cZone *Zone
+	for _, z := range zones {
+		if z.Path == "b.go" {
+			bZone = z
+		}
+		if z.Path == "c.go" {
+			cZone = z
+		}
+	}
+	if bZone == nil || cZone == nil {
+		t.Fatal("missing zones for b.go or c.go")
+	}
+	// b gets coupling 1.0 (6/6), c gets 0.5 (3/6)
+	if abs(bZone.CouplingScore-1.0) > 1e-9 {
+		t.Errorf("b coupling = %f, want 1.0", bZone.CouplingScore)
+	}
+	if abs(cZone.CouplingScore-0.5) > 1e-9 {
+		t.Errorf("c coupling = %f, want 0.5", cZone.CouplingScore)
 	}
 }
 

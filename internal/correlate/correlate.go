@@ -22,12 +22,14 @@ func Score(z *signals.Zone) float64 {
 	hunter := max0(z.HunterScore)
 	dep := max0(z.DepVulnScore)
 	churn := max0(z.ChurnScore)
+	coupling := max0(z.CouplingScore)
 
 	score := blast*Weights.Blast +
 		sentinel*Weights.Sentinel +
 		hunter*Weights.Hunter +
 		dep*Weights.Dep +
-		churn*Weights.Churn
+		churn*Weights.Churn +
+		coupling*Weights.Coupling
 
 	if z.SignalCount >= ConvergenceThreshold {
 		score *= Weights.Convergence
@@ -56,7 +58,14 @@ func Rank(zones map[string]*signals.Zone, minPriority float64, skipPaths []strin
 		out = append(out, ScoredZone{Zone: z, PriorityScore: s})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return out[i].PriorityScore > out[j].PriorityScore
+		if out[i].PriorityScore != out[j].PriorityScore {
+			return out[i].PriorityScore > out[j].PriorityScore
+		}
+		// Stable tie-break: higher fan-in first, then alphabetical by qualified name.
+		if out[i].BlastFanIn != out[j].BlastFanIn {
+			return out[i].BlastFanIn > out[j].BlastFanIn
+		}
+		return out[i].Qualified < out[j].Qualified
 	})
 	return out
 }

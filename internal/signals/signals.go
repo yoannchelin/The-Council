@@ -15,11 +15,12 @@ type Zone struct {
 	Qualified string // empty for file-level zones
 
 	// Normalised scores, 0..1. -1 means the agent was absent / no data for this zone.
-	BlastScore   float64
-	SentinelGap  float64 // 1.0 = no coverage, 0.0 = well covered (1 - quality_score)
-	HunterScore  float64 // fix_ratio 0..1
-	DepVulnScore float64 // CVSS/10
-	ChurnScore   float64 // commit frequency relative to max in repo
+	BlastScore    float64
+	SentinelGap   float64 // 1.0 = no coverage, 0.0 = well covered (1 - quality_score)
+	HunterScore   float64 // fix_ratio 0..1
+	DepVulnScore  float64 // CVSS/10
+	ChurnScore    float64 // commit frequency relative to max in repo
+	CouplingScore float64 // implicit co-change without call-graph edge, 0..1
 
 	// Human-readable context
 	BlastFanIn    int
@@ -28,6 +29,7 @@ type Zone struct {
 	DepAbandoned  bool
 	DepBadLicense bool
 	DepLicense    string
+	CouplingWith  string // path of the most frequent implicit coupling partner
 
 	// How many agent signals contributed
 	SignalCount int
@@ -49,13 +51,14 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 		z, ok := zones[k]
 		if !ok {
 			z = &Zone{
-				Path:         normP(path),
-				Qualified:    qualified,
-				BlastScore:   -1,
-				SentinelGap:  -1,
-				HunterScore:  -1,
-				DepVulnScore: -1,
-				ChurnScore:   -1,
+				Path:          normP(path),
+				Qualified:     qualified,
+				BlastScore:    -1,
+				SentinelGap:   -1,
+				HunterScore:   -1,
+				DepVulnScore:  -1,
+				ChurnScore:    -1,
+				CouplingScore: -1,
 			}
 			zones[k] = z
 		}
@@ -67,12 +70,13 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 		z, ok := zones[k]
 		if !ok {
 			z = &Zone{
-				Path:         normP(path),
-				BlastScore:   -1,
-				SentinelGap:  -1,
-				HunterScore:  -1,
-				DepVulnScore: -1,
-				ChurnScore:   -1,
+				Path:          normP(path),
+				BlastScore:    -1,
+				SentinelGap:   -1,
+				HunterScore:   -1,
+				DepVulnScore:  -1,
+				ChurnScore:    -1,
+				CouplingScore: -1,
 			}
 			zones[k] = z
 		}
@@ -161,6 +165,33 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 		missing = append(missing, "hunter")
 	}
 
+	// ---- coupling (hunter_cochange) ----
+	if present["hunter"] && s.TableExists("hunter_cochange") {
+		pairs, err := s.CoChangePairs(3)
+		if err == nil && len(pairs) > 0 {
+			maxCoC := 1
+			for _, p := range pairs {
+				if p.CoCommits > maxCoC {
+					maxCoC = p.CoCommits
+				}
+			}
+			for _, p := range pairs {
+				score := clamp01(float64(p.CoCommits) / float64(maxCoC))
+				pA, pB := normP(p.PathA), normP(p.PathB)
+				zA := getOrCreateFile(p.PathA)
+				if score > zA.CouplingScore {
+					zA.CouplingScore = score
+					zA.CouplingWith = pB
+				}
+				zB := getOrCreateFile(p.PathB)
+				if score > zB.CouplingScore {
+					zB.CouplingScore = score
+					zB.CouplingWith = pA
+				}
+			}
+		}
+	}
+
 	// ---- dep vulnerabilities + module problems ----
 	if present["dep"] {
 		vulns, err := s.DepVulnerabilities()
@@ -226,6 +257,10 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 		if z.ChurnScore < 0 && fz.ChurnScore >= 0 {
 			z.ChurnScore = fz.ChurnScore
 		}
+		if z.CouplingScore < 0 && fz.CouplingScore >= 0 {
+			z.CouplingScore = fz.CouplingScore
+			z.CouplingWith = fz.CouplingWith
+		}
 	}
 
 	// ---- count active signals ----
@@ -244,6 +279,9 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 			z.SignalCount++
 		}
 		if z.ChurnScore >= 0 {
+			z.SignalCount++
+		}
+		if z.CouplingScore >= 0 {
 			z.SignalCount++
 		}
 	}

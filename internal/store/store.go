@@ -191,6 +191,42 @@ GROUP BY path`)
 	return out, rows.Err()
 }
 
+// ---- hunter_cochange ----
+// hunter_cochange tracks pairs of files that change together frequently but
+// have no explicit call-graph edge — implicit coupling, a hidden risk.
+
+type CoChangePair struct {
+	PathA     string
+	PathB     string
+	CoCommits int
+}
+
+func (s *Store) CoChangePairs(minCoCommits int) ([]CoChangePair, error) {
+	rows, err := s.db.Query(`
+SELECT fa.path, fb.path, cc.co_commits
+FROM hunter_cochange cc
+JOIN files fa ON fa.id = cc.file_a
+JOIN files fb ON fb.id = cc.file_b
+WHERE cc.has_edge = 0
+  AND cc.co_commits >= ?
+  AND fa.is_test = 0
+  AND fb.is_test = 0
+ORDER BY cc.co_commits DESC`, minCoCommits)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CoChangePair
+	for rows.Next() {
+		var p CoChangePair
+		if err := rows.Scan(&p.PathA, &p.PathB, &p.CoCommits); err != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ---- hunter_file_stats ----
 // hunter_file_stats is keyed by file_id; join files to get path.
 // Column is fix_commits (not bug_fixes).

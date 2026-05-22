@@ -125,6 +125,13 @@ CREATE TABLE IF NOT EXISTS dep_vulnerabilities (
     fixed_in  TEXT,
     blast_risk REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS hunter_cochange (
+    file_a     INTEGER NOT NULL REFERENCES files(id),
+    file_b     INTEGER NOT NULL REFERENCES files(id),
+    co_commits INTEGER NOT NULL DEFAULT 0,
+    has_edge   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (file_a, file_b)
+);
 `
 
 // ---- helpers ----
@@ -406,6 +413,55 @@ func TestFileChurn(t *testing.T) {
 	}
 	if churns[0].LinesAdded != 15 {
 		t.Errorf("lines_added = %d", churns[0].LinesAdded)
+	}
+}
+
+func TestCoChangePairs(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	insertFile(t, s, 1, "pkg/a.go")
+	insertFile(t, s, 2, "pkg/b.go")
+	insertFile(t, s, 3, "pkg/c.go")
+
+	// a↔b: 10 co-commits without edge (implicit coupling)
+	s.db.Exec(`INSERT INTO hunter_cochange(file_a,file_b,co_commits,has_edge) VALUES(1,2,10,0)`)
+	// b↔c: 3 co-commits without edge
+	s.db.Exec(`INSERT INTO hunter_cochange(file_a,file_b,co_commits,has_edge) VALUES(2,3,3,0)`)
+	// a↔c: 15 co-commits but has explicit edge — should be excluded
+	s.db.Exec(`INSERT INTO hunter_cochange(file_a,file_b,co_commits,has_edge) VALUES(1,3,15,1)`)
+
+	pairs, err := s.CoChangePairs(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 2 {
+		t.Fatalf("expected 2 pairs (has_edge=1 excluded), got %d", len(pairs))
+	}
+	// Ordered DESC by co_commits: a↔b (10) first
+	if pairs[0].PathA != "pkg/a.go" || pairs[0].PathB != "pkg/b.go" {
+		t.Errorf("unexpected pair[0]: %+v", pairs[0])
+	}
+	if pairs[0].CoCommits != 10 {
+		t.Errorf("co_commits = %d, want 10", pairs[0].CoCommits)
+	}
+}
+
+func TestCoChangePairs_MinThreshold(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	insertFile(t, s, 1, "pkg/a.go")
+	insertFile(t, s, 2, "pkg/b.go")
+	// Only 2 co-commits — below minCoCommits=3 threshold
+	s.db.Exec(`INSERT INTO hunter_cochange(file_a,file_b,co_commits,has_edge) VALUES(1,2,2,0)`)
+
+	pairs, err := s.CoChangePairs(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 0 {
+		t.Errorf("expected 0 pairs below threshold, got %d", len(pairs))
 	}
 }
 

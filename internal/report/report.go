@@ -3,6 +3,7 @@ package report
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/yoannchl/the-council/internal/correlate"
@@ -113,6 +114,10 @@ func buildItem(rank int, sz correlate.ScoredZone) ActionItem {
 		sigs = append(sigs, "archaeo")
 		parts = append(parts, fmt.Sprintf("high churn (%.0f%%)", z.ChurnScore*100))
 	}
+	if z.CouplingScore > 0.3 {
+		sigs = append(sigs, "coupling")
+		parts = append(parts, fmt.Sprintf("implicit coupling with %s", z.CouplingWith))
+	}
 
 	target := z.Path
 	if z.Qualified != "" {
@@ -148,6 +153,11 @@ func actionText(kind string, z *signals.Zone) string {
 		return fmt.Sprintf("Review license compatibility for %s (license: %s).", z.Path, z.DepLicense)
 	case "add_coverage":
 		return fmt.Sprintf("Increase test coverage for %s.", z.Path)
+	case "investigate_coupling":
+		if z.CouplingWith != "" {
+			return fmt.Sprintf("Investigate hidden coupling: %s co-changes frequently with %s without an explicit dependency.", z.Path, z.CouplingWith)
+		}
+		return fmt.Sprintf("Investigate coupling or hidden dependency in %s.", z.Path)
 	default:
 		return fmt.Sprintf("Investigate coupling or hidden dependency in %s.", z.Path)
 	}
@@ -202,11 +212,8 @@ func FormatText(a *Assessment, repoPath string) string {
 	var agentParts []string
 	for _, ag := range []string{"archaeo", "blast", "sentinel", "hunter", "dep"} {
 		mark := "✗"
-		for _, p := range a.AgentsPresent {
-			if p == ag {
-				mark = "✓"
-				break
-			}
+		if slices.Contains(a.AgentsPresent, ag) {
+			mark = "✓"
 		}
 		agentParts = append(agentParts, ag+" "+mark)
 	}

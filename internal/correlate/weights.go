@@ -8,6 +8,7 @@ var Weights = struct {
 	Hunter      float64
 	Dep         float64
 	Churn       float64 // archaeo file_commits frequency
+	Coupling    float64 // implicit co-change without call-graph edge
 	Convergence float64 // multiplier when 3+ signals converge
 }{
 	Blast:       0.28,
@@ -15,6 +16,7 @@ var Weights = struct {
 	Hunter:      0.23,
 	Dep:         0.18,
 	Churn:       0.07,
+	Coupling:    0.07,
 	Convergence: 1.50,
 }
 

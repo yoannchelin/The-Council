@@ -24,13 +24,14 @@ func zone(blast, sentinel, hunter, dep, churn float64) *signals.Zone {
 		signalCount++
 	}
 	return &signals.Zone{
-		Path:         "internal/foo/bar.go",
-		BlastScore:   blast,
-		SentinelGap:  sentinel,
-		HunterScore:  hunter,
-		DepVulnScore: dep,
-		ChurnScore:   churn,
-		SignalCount:  signalCount,
+		Path:          "internal/foo/bar.go",
+		BlastScore:    blast,
+		SentinelGap:   sentinel,
+		HunterScore:   hunter,
+		DepVulnScore:  dep,
+		ChurnScore:    churn,
+		CouplingScore: -1,
+		SignalCount:   signalCount,
 	}
 }
 
@@ -153,6 +154,39 @@ func TestConvergenceZones(t *testing.T) {
 	conv := ConvergenceZones(ranked)
 	if len(conv) != 2 {
 		t.Errorf("expected 2 convergence zones, got %d", len(conv))
+	}
+}
+
+func TestScore_CouplingContributes(t *testing.T) {
+	z := &signals.Zone{
+		BlastScore:    -1,
+		SentinelGap:   -1,
+		HunterScore:   -1,
+		DepVulnScore:  -1,
+		ChurnScore:    -1,
+		CouplingScore: 1.0,
+		CouplingWith:  "pkg/other.go",
+		SignalCount:   1,
+	}
+	s := Score(z)
+	expected := 1.0 * Weights.Coupling
+	if abs(s-expected) > 1e-9 {
+		t.Errorf("expected %f (coupling only), got %f", expected, s)
+	}
+}
+
+func TestScore_TiebreakerSort(t *testing.T) {
+	// Two zones with identical priority scores: higher fan-in should rank first.
+	zones := map[string]*signals.Zone{
+		"low_fanin":  {Path: "a.go", BlastScore: 0.5, SentinelGap: -1, HunterScore: -1, DepVulnScore: -1, ChurnScore: -1, CouplingScore: -1, BlastFanIn: 2, SignalCount: 1},
+		"high_fanin": {Path: "b.go", BlastScore: 0.5, SentinelGap: -1, HunterScore: -1, DepVulnScore: -1, ChurnScore: -1, CouplingScore: -1, BlastFanIn: 20, SignalCount: 1},
+	}
+	ranked := Rank(zones, 0, nil)
+	if len(ranked) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(ranked))
+	}
+	if ranked[0].BlastFanIn != 20 {
+		t.Errorf("higher fan-in should rank first, got fan-in=%d", ranked[0].BlastFanIn)
 	}
 }
 
