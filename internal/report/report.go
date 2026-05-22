@@ -26,6 +26,8 @@ type ActionItem struct {
 // Assessment is the full result of an assess_repo call.
 type Assessment struct {
 	HealthScore      float64
+	TotalZones       int // total zones with any signal (denominator for health score)
+	UnhealthyZones   int // zones with priority score >= 0.5
 	AgentsPresent    []string
 	MissingAgents    []string
 	TopItems         []ActionItem
@@ -62,7 +64,7 @@ func Build(scored []correlate.ScoredZone, agentsPresent []string, missingAgents 
 		}
 	}
 
-	a.HealthScore = computeHealth(scored)
+	a.HealthScore, a.TotalZones, a.UnhealthyZones = computeHealth(scored)
 	return a
 }
 
@@ -171,23 +173,30 @@ func actionText(kind string, z *signals.Zone) string {
 	}
 }
 
-func computeHealth(scored []correlate.ScoredZone) float64 {
-	if len(scored) == 0 {
-		return 100.0
-	}
-	top := scored
-	if len(top) > 10 {
-		top = top[:10]
+// computeHealth returns a 0-100 score representing the overall risk level
+// across all assessed zones.
+//
+// Formula: 100 × (1 − avgScore), where avgScore is the mean priority score
+// across every zone (not just the top N). This ensures the score reflects
+// breadth of risk, not just the intensity of the worst few zones.
+// unhealthy counts zones with priority >= 0.5 for context.
+func computeHealth(scored []correlate.ScoredZone) (health float64, total, unhealthy int) {
+	total = len(scored)
+	if total == 0 {
+		return 100.0, 0, 0
 	}
 	var sum float64
-	for _, s := range top {
+	for _, s := range scored {
 		sum += s.PriorityScore
+		if s.PriorityScore >= 0.5 {
+			unhealthy++
+		}
 	}
-	health := 100.0 * (1.0 - sum/float64(len(top)))
-	if health < 0 {
-		health = 0
+	h := 100.0 * (1.0 - sum/float64(total))
+	if h < 0 {
+		h = 0
 	}
-	return health
+	return h, total, unhealthy
 }
 
 // ToStoreItems converts report ActionItems to store ActionItems for persistence.
@@ -215,7 +224,7 @@ func FormatText(a *Assessment, repoPath string) string {
 
 	fmt.Fprintf(&sb, "Council Assessment\n")
 	fmt.Fprintf(&sb, "Repo: %s\n", repoPath)
-	fmt.Fprintf(&sb, "Health score: %.0f/100\n", a.HealthScore)
+	fmt.Fprintf(&sb, "Health score: %.1f/100 (%d/%d zones at risk)\n", a.HealthScore, a.UnhealthyZones, a.TotalZones)
 
 	var agentParts []string
 	for _, ag := range []string{"archaeo", "blast", "sentinel", "hunter", "dep"} {
