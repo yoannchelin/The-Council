@@ -109,7 +109,8 @@ func (s *Store) BlastMetrics() ([]BlastMetric, error) {
 SELECT s.qualified, f.path, bm.risk_score, bm.fan_in, bm.transitive_in
 FROM blast_metrics bm
 JOIN symbols s ON s.id = bm.symbol_id
-JOIN files   f ON f.id = s.file_id`)
+JOIN files   f ON f.id = s.file_id
+WHERE f.is_test = 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +143,8 @@ func (s *Store) SentinelCoverage() ([]SentinelCoverage, error) {
 SELECT f.path, s.qualified, sc.direct_tests, sc.quality_score, sc.is_tested
 FROM sentinel_coverage sc
 JOIN symbols s ON s.id = sc.symbol_id
-JOIN files   f ON f.id = s.file_id`)
+JOIN files   f ON f.id = s.file_id
+WHERE f.is_test = 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -200,10 +202,12 @@ type HunterFileStat struct {
 }
 
 func (s *Store) HunterFileStats() ([]HunterFileStat, error) {
+	// Require at least 5 total commits to avoid fix_ratio=1.0 artefacts on sparse history.
 	rows, err := s.db.Query(`
 SELECT f.path, hfs.fix_commits, hfs.fix_ratio
 FROM hunter_file_stats hfs
-JOIN files f ON f.id = hfs.file_id`)
+JOIN files f ON f.id = hfs.file_id
+WHERE hfs.total_commits >= 5`)
 	if err != nil {
 		return nil, err
 	}
@@ -297,14 +301,16 @@ type FileChurn struct {
 }
 
 func (s *Store) FileChurn() ([]FileChurn, error) {
+	// Only return files with at least 3 commits — single-commit entries are noise.
 	rows, err := s.db.Query(`
 SELECT f.path,
-       COUNT(fc.commit_hash)    AS commit_count,
+       COUNT(fc.commit_hash)      AS commit_count,
        COALESCE(SUM(fc.added),0)   AS lines_added,
        COALESCE(SUM(fc.deleted),0) AS lines_deleted
 FROM file_commits fc
 JOIN files f ON f.id = fc.file_id
-GROUP BY fc.file_id`)
+GROUP BY fc.file_id
+HAVING commit_count >= 3`)
 	if err != nil {
 		return nil, err
 	}

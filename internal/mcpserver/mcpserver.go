@@ -16,8 +16,9 @@ import (
 
 // AssessRepoInput is the typed input for assess_repo.
 type AssessRepoInput struct {
-	TopN        int     `json:"top_n"`
-	MinPriority float64 `json:"min_priority"`
+	TopN        int      `json:"top_n"`
+	MinPriority float64  `json:"min_priority"`
+	SkipPaths   []string `json:"skip_paths"` // path prefixes to exclude, e.g. ["test/", "vendor/"]
 }
 
 // ExplainZoneInput is the typed input for explain_zone.
@@ -45,6 +46,7 @@ func (srv *Server) Register(server *mcp.Server) {
 			"properties": map[string]any{
 				"top_n":        map[string]any{"type": "integer", "description": "Number of action items to return (default 10)"},
 				"min_priority": map[string]any{"type": "number", "description": "Minimum priority score 0..1 (default 0)"},
+				"skip_paths":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Path prefixes to exclude, e.g. [\"test/\", \"vendor/\"]"},
 			},
 		}),
 	}, mcp.ToolHandlerFor[AssessRepoInput, any](srv.assessRepo))
@@ -73,7 +75,7 @@ func (srv *Server) assessRepo(_ context.Context, _ *mcp.CallToolRequest, input A
 		return nil, nil, fmt.Errorf("collect signals: %w", err)
 	}
 
-	scored := correlate.Rank(zones, input.MinPriority)
+	scored := correlate.Rank(zones, input.MinPriority, input.SkipPaths)
 	present := presentAgents(srv.store)
 	a := report.Build(scored, present, missing, topN)
 

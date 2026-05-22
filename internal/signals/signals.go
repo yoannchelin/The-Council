@@ -169,7 +169,7 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 		}
 		for _, v := range vulns {
 			z := getOrCreateFile("deps/" + v.Module)
-			score := clamp01(v.CVSS / 10.0)
+			score := cvssScore(v.CVSS, v.Severity)
 			if score > z.DepVulnScore {
 				z.DepVulnScore = score
 			}
@@ -249,6 +249,26 @@ func Collect(s *store.Store, repoRoot string) (map[string]*Zone, []string, error
 	}
 
 	return zones, missing, nil
+}
+
+// cvssScore returns a normalised 0..1 score.
+// When CVSS is 0 (data absent), falls back to a score derived from the severity string.
+func cvssScore(cvss float64, severity string) float64 {
+	if cvss > 0 {
+		return clamp01(cvss / 10.0)
+	}
+	switch strings.ToLower(severity) {
+	case "critical":
+		return 0.90
+	case "high":
+		return 0.70
+	case "moderate", "medium":
+		return 0.50
+	case "low":
+		return 0.20
+	default:
+		return 0.10
+	}
 }
 
 func clamp01(v float64) float64 {

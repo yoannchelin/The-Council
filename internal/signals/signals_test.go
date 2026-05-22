@@ -183,7 +183,7 @@ func TestCollect_HunterSignal(t *testing.T) {
 	defer cleanup()
 
 	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'cmd/main.go','main')`)
-	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,fix_commits,fix_ratio) VALUES(1,12,0.6)`)
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(1,20,12,0.6)`)
 
 	zones, _, _ := Collect(s, "")
 	for _, z := range zones {
@@ -226,12 +226,15 @@ func TestCollect_ChurnSignal(t *testing.T) {
 	defer cleanup()
 
 	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'hot.go','main')`)
-	s.DB().Exec(`INSERT INTO commits(hash,author,email,ts,subject) VALUES('a','x','x@y',0,'f')`)
-	s.DB().Exec(`INSERT INTO file_commits(file_id,commit_hash,added,deleted) VALUES(1,'a',5,2)`)
+	for i, h := range []string{"c1", "c2", "c3"} {
+		s.DB().Exec(`INSERT INTO commits(hash,author,email,ts,subject) VALUES(?,?,?,?,?)`,
+			h, "x", "x@y", i, "fix")
+		s.DB().Exec(`INSERT INTO file_commits(file_id,commit_hash,added,deleted) VALUES(1,?,5,2)`, h)
+	}
 
 	zones, _, _ := Collect(s, "")
 	for _, z := range zones {
-		// 1 commit out of max 1 → churn 1.0
+		// 3 commits out of max 3 → churn 1.0
 		if z.ChurnScore != 1.0 {
 			t.Errorf("churn score = %f, want 1.0", z.ChurnScore)
 		}
@@ -248,7 +251,7 @@ func TestCollect_ZoneMerge_SymbolInheritsFileSignals(t *testing.T) {
 	s.DB().Exec(`INSERT INTO files(id,path,package) VALUES(1,'internal/pay.go','pay')`)
 	s.DB().Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'pay.Charge',1,'func','Charge')`)
 	s.DB().Exec(`INSERT INTO blast_metrics(symbol_id,risk_score,fan_in) VALUES(1,80.0,10)`)
-	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,fix_commits,fix_ratio) VALUES(1,5,0.5)`)
+	s.DB().Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(1,10,5,0.5)`)
 
 	zones, _, _ := Collect(s, "")
 
@@ -287,6 +290,64 @@ func TestCollect_SignalCount(t *testing.T) {
 	for _, z := range zones {
 		if z.BlastScore >= 0 && z.SentinelGap >= 0 && z.SignalCount < 2 {
 			t.Errorf("signal count should be ≥2 when both blast and sentinel are present, got %d", z.SignalCount)
+		}
+	}
+}
+
+func TestCvssScore_FallbackBySeverity(t *testing.T) {
+	cases := []struct {
+		cvss     float64
+		severity string
+		wantMin  float64
+		wantMax  float64
+	}{
+		{9.1, "CRITICAL", 0.90, 0.92},  // real CVSS used
+		{0.0, "CRITICAL", 0.89, 0.91},  // fallback
+		{0.0, "HIGH", 0.69, 0.71},
+		{0.0, "moderate", 0.49, 0.51},
+		{0.0, "medium", 0.49, 0.51},
+		{0.0, "low", 0.19, 0.21},
+		{0.0, "", 0.09, 0.11}, // unknown
+	}
+	for _, c := range cases {
+		got := cvssScore(c.cvss, c.severity)
+		if got < c.wantMin || got > c.wantMax {
+			t.Errorf("cvssScore(%v, %q) = %f, want [%f, %f]", c.cvss, c.severity, got, c.wantMin, c.wantMax)
+		}
+	}
+}
+
+func TestCollect_DepVuln_FallbackCVSS(t *testing.T) {
+	s, cleanup := openDB(t)
+	defer cleanup()
+
+	s.DB().Exec(`INSERT INTO dep_modules(id,path,version) VALUES(1,'evil/pkg','v1.0')`)
+	// cvss_score NULL, severity CRITICAL → should get fallback score 0.9
+	s.DB().Exec(`INSERT INTO dep_vulnerabilities(module_id,vuln_id,severity,summary)
+                 VALUES(1,'GO-2025-X','CRITICAL','bad')`)
+
+	zones, _, _ := Collect(s, "")
+	for _, z := range zones {
+		if z.DepVulnScore < 0.85 {
+			t.Errorf("expected fallback score ~0.9 for CRITICAL, got %f", z.DepVulnScore)
+		}
+	}
+}
+
+func TestCollect_TestFiles_Excluded(t *testing.T) {
+	s, cleanup := openDB(t)
+	defer cleanup()
+
+	// is_test=1 → blast and sentinel should not see this symbol
+	s.DB().Exec(`INSERT INTO files(id,path,package,is_test) VALUES(1,'pkg/foo_test.go','foo',1)`)
+	s.DB().Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'foo.TestHelper',1,'func','TestHelper')`)
+	s.DB().Exec(`INSERT INTO blast_metrics(symbol_id,risk_score) VALUES(1,90.0)`)
+	s.DB().Exec(`INSERT INTO sentinel_coverage(symbol_id,direct_tests,quality_score,is_tested) VALUES(1,0,0.0,0)`)
+
+	zones, _, _ := Collect(s, "")
+	for _, z := range zones {
+		if z.BlastScore >= 0 || z.SentinelGap >= 0 {
+			t.Errorf("test file zone should have no blast/sentinel signals, got blast=%f sentinel=%f", z.BlastScore, z.SentinelGap)
 		}
 	}
 }

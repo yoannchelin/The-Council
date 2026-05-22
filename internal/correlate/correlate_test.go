@@ -87,7 +87,7 @@ func TestRank_Sorted(t *testing.T) {
 		"b": zone(0.9, 0.9, 0.9, -1, -1),
 		"c": zone(0.5, -1, -1, -1, -1),
 	}
-	ranked := Rank(zones, 0)
+	ranked := Rank(zones, 0, nil)
 	if len(ranked) != 3 {
 		t.Fatalf("expected 3 results, got %d", len(ranked))
 	}
@@ -105,14 +105,40 @@ func TestRank_MinPriorityFilter(t *testing.T) {
 		"low":  zone(0.1, -1, -1, -1, -1),
 		"high": zone(0.9, 0.9, 0.9, -1, -1),
 	}
-	ranked := Rank(zones, 0.5)
+	ranked := Rank(zones, 0.5, nil)
 	if len(ranked) != 1 {
 		t.Errorf("expected 1 result above threshold, got %d", len(ranked))
 	}
 }
 
+func TestRank_SkipPaths(t *testing.T) {
+	zones := map[string]*signals.Zone{
+		"a": {Path: "test/e2e/framework/log.go",  BlastScore: 0.9, SentinelGap: 1.0, HunterScore: -1, DepVulnScore: -1, ChurnScore: -1, SignalCount: 2},
+		"b": {Path: "pkg/apis/core/validation.go", BlastScore: 0.8, SentinelGap: 1.0, HunterScore: -1, DepVulnScore: -1, ChurnScore: -1, SignalCount: 2},
+	}
+	ranked := Rank(zones, 0, []string{"test/"})
+	if len(ranked) != 1 {
+		t.Fatalf("expected 1 result (test/ excluded), got %d", len(ranked))
+	}
+	if ranked[0].Path != "pkg/apis/core/validation.go" {
+		t.Errorf("wrong zone returned: %q", ranked[0].Path)
+	}
+}
+
+func TestRank_SkipPaths_MultiplePrefix(t *testing.T) {
+	zones := map[string]*signals.Zone{
+		"a": {Path: "test/e2e/log.go",    BlastScore: 0.9, SignalCount: 1},
+		"b": {Path: "vendor/foo/bar.go",  BlastScore: 0.8, SignalCount: 1},
+		"c": {Path: "pkg/real/code.go",   BlastScore: 0.7, SignalCount: 1},
+	}
+	ranked := Rank(zones, 0, []string{"test/", "vendor/"})
+	if len(ranked) != 1 || ranked[0].Path != "pkg/real/code.go" {
+		t.Errorf("expected only pkg/real/code.go, got %v", ranked)
+	}
+}
+
 func TestRank_Empty(t *testing.T) {
-	ranked := Rank(map[string]*signals.Zone{}, 0)
+	ranked := Rank(map[string]*signals.Zone{}, 0, nil)
 	if len(ranked) != 0 {
 		t.Error("expected empty result")
 	}

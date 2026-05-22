@@ -248,7 +248,7 @@ func TestHunterFileStats(t *testing.T) {
 	defer cleanup()
 
 	insertFile(t, s, 1, "cmd/main.go")
-	s.db.Exec(`INSERT INTO hunter_file_stats(file_id,fix_commits,fix_ratio) VALUES(1,8,0.4)`)
+	s.db.Exec(`INSERT INTO hunter_file_stats(file_id,total_commits,fix_commits,fix_ratio) VALUES(1,20,8,0.4)`)
 
 	stats, err := s.HunterFileStats()
 	if err != nil {
@@ -298,6 +298,53 @@ func TestDepVulnerabilities(t *testing.T) {
 	}
 }
 
+func TestBlastMetrics_ExcludesTestFiles(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	// is_test=0 → should appear; is_test=1 → must be excluded
+	s.db.Exec(`INSERT INTO files(id,path,package,is_test) VALUES(1,'pkg/foo.go','foo',0)`)
+	s.db.Exec(`INSERT INTO files(id,path,package,is_test) VALUES(2,'pkg/foo_test.go','foo',1)`)
+	s.db.Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'foo.F',1,'func','F')`)
+	s.db.Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(2,'foo.TestF',2,'func','TestF')`)
+	s.db.Exec(`INSERT INTO blast_metrics(symbol_id,risk_score) VALUES(1,60.0)`)
+	s.db.Exec(`INSERT INTO blast_metrics(symbol_id,risk_score) VALUES(2,80.0)`)
+
+	metrics, err := s.BlastMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 {
+		t.Fatalf("expected 1 metric (test file excluded), got %d", len(metrics))
+	}
+	if metrics[0].Qualified != "foo.F" {
+		t.Errorf("wrong symbol returned: %q", metrics[0].Qualified)
+	}
+}
+
+func TestSentinelCoverage_ExcludesTestFiles(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+
+	s.db.Exec(`INSERT INTO files(id,path,package,is_test) VALUES(1,'pkg/auth.go','auth',0)`)
+	s.db.Exec(`INSERT INTO files(id,path,package,is_test) VALUES(2,'pkg/auth_test.go','auth',1)`)
+	s.db.Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(1,'auth.Login',1,'func','Login')`)
+	s.db.Exec(`INSERT INTO symbols(id,qualified,file_id,kind,name) VALUES(2,'auth.TestLogin',2,'func','TestLogin')`)
+	s.db.Exec(`INSERT INTO sentinel_coverage(symbol_id,direct_tests,quality_score,is_tested) VALUES(1,0,0.0,0)`)
+	s.db.Exec(`INSERT INTO sentinel_coverage(symbol_id,direct_tests,quality_score,is_tested) VALUES(2,0,0.0,0)`)
+
+	covs, err := s.SentinelCoverage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(covs) != 1 {
+		t.Fatalf("expected 1 coverage row (test file excluded), got %d", len(covs))
+	}
+	if covs[0].Qualified != "auth.Login" {
+		t.Errorf("wrong symbol: %q", covs[0].Qualified)
+	}
+}
+
 func TestDepVulnerabilities_NoFix(t *testing.T) {
 	s, cleanup := openTestStore(t)
 	defer cleanup()
@@ -340,10 +387,12 @@ func TestFileChurn(t *testing.T) {
 	defer cleanup()
 
 	insertFile(t, s, 1, "hot/file.go")
-	s.db.Exec(`INSERT INTO commits(hash,author,email,ts,subject) VALUES('abc','A','a@b',0,'fix')`)
-	s.db.Exec(`INSERT INTO commits(hash,author,email,ts,subject) VALUES('def','A','a@b',1,'fix2')`)
-	s.db.Exec(`INSERT INTO file_commits(file_id,commit_hash,added,deleted) VALUES(1,'abc',10,5)`)
-	s.db.Exec(`INSERT INTO file_commits(file_id,commit_hash,added,deleted) VALUES(1,'def',3,1)`)
+	for i, h := range []string{"a1", "a2", "a3"} {
+		s.db.Exec(`INSERT INTO commits(hash,author,email,ts,subject) VALUES(?,?,?,?,?)`,
+			h, "A", "a@b", i, "fix")
+		s.db.Exec(`INSERT INTO file_commits(file_id,commit_hash,added,deleted) VALUES(1,?,?,?)`,
+			h, 5, 2)
+	}
 
 	churns, err := s.FileChurn()
 	if err != nil {
@@ -352,10 +401,10 @@ func TestFileChurn(t *testing.T) {
 	if len(churns) != 1 {
 		t.Fatalf("expected 1, got %d", len(churns))
 	}
-	if churns[0].CommitCount != 2 {
+	if churns[0].CommitCount != 3 {
 		t.Errorf("commit_count = %d", churns[0].CommitCount)
 	}
-	if churns[0].LinesAdded != 13 {
+	if churns[0].LinesAdded != 15 {
 		t.Errorf("lines_added = %d", churns[0].LinesAdded)
 	}
 }

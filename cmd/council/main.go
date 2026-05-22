@@ -38,11 +38,21 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `council — The Council meta-agent CLI
 
 Usage:
-  council assess  --db <path> [--repo <path>] [--top <n>] [--min <score>] [--json]
+  council assess  --db <path> [--repo <path>] [--top <n>] [--min <score>]
+                  [--skip-path <prefix>]... [--json]
   council top     --db <path> [--repo <path>] [--n <n>]
   council explain --db <path> [--repo <path>] (--path <p> | --qualified <q>)
-  council purge   --db <path> --older-than <days>`)
+  council purge   --db <path> --older-than <days>
+
+Example:
+  council assess --db .archaeo/index.db --repo . --skip-path test/ --skip-path vendor/`)
 }
+
+// multiFlag allows a flag to be specified multiple times.
+type multiFlag []string
+
+func (m *multiFlag) String() string  { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func openStore(dbPath string) *store.Store {
 	s, err := store.Open(dbPath)
@@ -60,6 +70,8 @@ func cmdAssess(args []string) {
 	topN := fs.Int("top", 10, "Number of action items")
 	minPriority := fs.Float64("min", 0.0, "Minimum priority score (0..1)")
 	asJSON := fs.Bool("json", false, "Output JSON instead of text")
+	var skipPaths multiFlag
+	fs.Var(&skipPaths, "skip-path", "Path prefix to exclude (repeatable, e.g. --skip-path test/)")
 	fs.Parse(args)
 
 	if *dbPath == "" {
@@ -76,7 +88,7 @@ func cmdAssess(args []string) {
 		os.Exit(1)
 	}
 
-	scored := correlate.Rank(zones, *minPriority)
+	scored := correlate.Rank(zones, *minPriority, skipPaths)
 	present := agentNames(s.AgentsPresent())
 	a := report.Build(scored, present, missing, *topN)
 

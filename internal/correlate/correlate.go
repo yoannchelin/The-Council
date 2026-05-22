@@ -3,6 +3,7 @@ package correlate
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/yoannchl/the-council/internal/signals"
 )
@@ -39,11 +40,15 @@ func Score(z *signals.Zone) float64 {
 	return score
 }
 
-// Rank takes all zones, scores them, filters below minPriority, and returns
-// them sorted by descending priority.
-func Rank(zones map[string]*signals.Zone, minPriority float64) []ScoredZone {
+// Rank takes all zones, scores them, filters below minPriority and by skipPaths,
+// and returns them sorted by descending priority.
+// skipPaths is a list of path prefixes to exclude (e.g. "test/", "vendor/").
+func Rank(zones map[string]*signals.Zone, minPriority float64, skipPaths []string) []ScoredZone {
 	out := make([]ScoredZone, 0, len(zones))
 	for _, z := range zones {
+		if hasPrefix(z.Path, skipPaths) {
+			continue
+		}
 		s := Score(z)
 		if s < minPriority {
 			continue
@@ -54,6 +59,15 @@ func Rank(zones map[string]*signals.Zone, minPriority float64) []ScoredZone {
 		return out[i].PriorityScore > out[j].PriorityScore
 	})
 	return out
+}
+
+func hasPrefix(path string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // ConvergenceZones returns zones where 3+ signals converge.
